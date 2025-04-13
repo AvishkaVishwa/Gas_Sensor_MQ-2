@@ -1,48 +1,56 @@
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "esp_adc/adc_oneshot.h"  // New ADC API
-#include "driver/gpio.h"
+#include "esp_log.h"
+#include "nvs_flash.h"
+#include "mq2_sensor.h"
+#include "thingsboard.h"
+#include "driver/gpio.h" 
+#include "driver/adc.h"
 
-#define MQ2_ADC_CHANNEL  ADC_CHANNEL_6 // GPIO34
-#define OUTPUT_PIN       GPIO_NUM_2
-#define THRESHOLD        300
+static const char *TAG = "Main";
+
+// Configuration
+#define MQ2_ADC_CHANNEL  ADC_CHANNEL_6  // GPIO34
+#define OUTPUT_PIN       GPIO_NUM_2      // Alarm output pin
+#define GAS_THRESHOLD    300            // Alarm threshold
+#define DEVICE_TOKEN     "28zMWT2tFgz3kqfyQndk"
+#define SAMPLE_PERIOD_MS 2000           // Telemetry send interval
 
 void app_main(void)
 {
-    // Configure output pin
-    gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << OUTPUT_PIN),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE
-    };
-    gpio_config(&io_conf);
+    ESP_LOGI(TAG, "Starting application...");
 
-    // Configure ADC
-    adc_oneshot_unit_handle_t adc1_handle;
-    adc_oneshot_unit_init_cfg_t init_config = {
-        .unit_id = ADC_UNIT_1,
-    };
-    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config, &adc1_handle));
+    // Initialize MQ2 sensor
+    ESP_ERROR_CHECK(mq2_init(OUTPUT_PIN, MQ2_ADC_CHANNEL, GAS_THRESHOLD));
     
-    adc_oneshot_chan_cfg_t chan_config = {
-        .bitwidth = ADC_BITWIDTH_12,
-        .atten = ADC_ATTEN_DB_11,
-    };
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, MQ2_ADC_CHANNEL, &chan_config));
+    // Perform sensor warmup
+    ESP_ERROR_CHECK(mq2_warmup(30));
+    
+    // Initialize WiFi
+    ESP_ERROR_CHECK(thingsboard_wifi_init());
+    
+    // Wait for WiFi connection
+    vTaskDelay(pdMS_TO_TICKS(5000));
+    
+    // Initialize ThingsBoard MQTT
+    ESP_ERROR_CHECK(thingsboard_mqtt_init(DEVICE_TOKEN));
+    
+    // Wait for MQTT connection
+    vTaskDelay(pdMS_TO_TICKS(2000));
 
+    // Main loop
     while (true) {
-        int mq2Value;
-        ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, MQ2_ADC_CHANNEL, &mq2Value));
-        printf("MQ2: %d\n", mq2Value);
-
-        if (mq2Value > THRESHOLD) {
-            gpio_set_level(OUTPUT_PIN, 1);
-        } else {
-            gpio_set_level(OUTPUT_PIN, 0);
-        }
-        vTaskDelay(pdMS_TO_TICKS(200));
+        int sensor_value;
+        bool is_alarm;
+        
+        // Read sensor
+        ESP_ERROR_CHECK(mq2_read(&sensor_value, &is_alarm));
+        
+        // Send telemetry to ThingsBoard
+        ESP_ERROR_CHECK(thingsboard_send_telemetry(sensor_value, is_alarm));
+        
+        // Wait before next reading
+        vTaskDelay(pdMS_TO_TICKS(SAMPLE_PERIOD_MS));
     }
 }
